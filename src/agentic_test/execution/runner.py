@@ -66,6 +66,7 @@ class PytestRunner:
             "pytest",
             clean_tests,
             f"--cov={clean_cov}",
+            "--cov-branch",
         ]
 
         if cov_report_path is not None:
@@ -100,7 +101,7 @@ class PytestRunner:
             for index, test_path in enumerate(tests_paths)
         ]
         clean_cov = self._validate_and_normalize_path(cov_source, "cov_source")
-        tokens = ["pytest", *clean_tests, f"--cov={clean_cov}"]
+        tokens = ["pytest", *clean_tests, f"--cov={clean_cov}", "--cov-branch"]
 
         if cov_report_path is not None:
             clean_report = self._validate_and_normalize_path(

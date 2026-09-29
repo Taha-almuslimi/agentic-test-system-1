@@ -25,6 +25,7 @@ def test_construct_command_deterministic_tokens_without_report() -> None:
         "pytest",
         "tests/test_calculator.py",
         "--cov=src/calculator",
+        "--cov-branch",
         "-o",
         "cache_dir=/tmp/.pytest_cache",
     ]
@@ -44,6 +45,7 @@ def test_construct_command_deterministic_tokens_with_report() -> None:
         "pytest",
         "tests",
         "--cov=src",
+        "--cov-branch",
         "--cov-report=json:/tmp/coverage.json",
         "-o",
         "cache_dir=/tmp/.pytest_cache",
@@ -71,6 +73,7 @@ def test_construct_command_for_paths_includes_every_explicit_test_path() -> None
         "/workspace/src/tests/test_add.py",
         "/workspace/src/tests/test_mul.py",
         "--cov=/workspace/src",
+        "--cov-branch",
         "--cov-report=json:/workspace/output/coverage.json",
         "-o",
         "cache_dir=/tmp/.pytest_cache",
@@ -96,7 +99,8 @@ def test_construct_command_normalizes_backslashes() -> None:
 
     assert cmd[1] == "tests/unit/test_foo.py"
     assert cmd[2] == "--cov=src/pkg/sub"
-    assert cmd[3] == "--cov-report=json:output/cov.json"
+    assert cmd[3] == "--cov-branch"
+    assert cmd[4] == "--cov-report=json:output/cov.json"
 
 
 def test_construct_command_rejects_empty_paths() -> None:

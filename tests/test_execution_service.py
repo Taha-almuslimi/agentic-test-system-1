@@ -223,6 +223,7 @@ def test_successful_candidate_execution(tmp_path: Path) -> None:
         "pytest",
         "/workspace/tests",
         "--cov=/workspace/src",
+        "--cov-branch",
         "--cov-report=json:/workspace/output/coverage.json",
         "-o",
         "cache_dir=/tmp/.pytest_cache",
