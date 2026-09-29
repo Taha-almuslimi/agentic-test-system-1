@@ -9,7 +9,7 @@ import hashlib
 from pathlib import Path
 import shutil
 import tempfile
-from typing import Dict, List, Optional, Sequence, Union
+from typing import Dict, List, Optional, Sequence, Tuple
 import uuid
 
 from agentic_test.analysis.git_service import is_excluded_path
@@ -157,7 +157,7 @@ class ExecutionService:
 
         self._last_summary: Optional[TestRunSummary] = None
         self._last_coverage: Optional[CoverageMetrics] = None
-        self._last_evidence: Optional[ExecutionEvidence] = None
+        self._last_evidences: Tuple[ExecutionEvidence, ...] = ()
 
     @property
     def sandbox_manager(self) -> SandboxManager:
@@ -185,9 +185,9 @@ class ExecutionService:
         return self._last_coverage
 
     @property
-    def last_evidence(self) -> Optional[ExecutionEvidence]:
-        """Populated ExecutionEvidence record from the most recent execution, if available."""
-        return self._last_evidence
+    def last_evidences(self) -> Tuple[ExecutionEvidence, ...]:
+        """Evidence records emitted by the most recent execution, in candidate order."""
+        return self._last_evidences
 
     def _require_repository_root(self) -> Path:
         """Returns the configured target repository root or fails before sandbox setup."""
@@ -242,6 +242,73 @@ class ExecutionService:
                 f"Halting immediately (UC-05 Extension 9a)."
             )
 
+    def _execute_and_verify_source_integrity(
+        self,
+        sandbox_config: SandboxConfig,
+        command: List[str],
+        repository_root: Path,
+        pre_source_hash: str,
+    ) -> ExecutionRawResult:
+        """Executes one session and enforces INV-02 even when sandbox execution raises."""
+        try:
+            return self._execute_in_sandbox(sandbox_config, command)
+        finally:
+            self._verify_source_integrity(repository_root, pre_source_hash)
+
+    def _build_evidence(
+        self,
+        raw_result: ExecutionRawResult,
+        run_id: str,
+        candidate_id: Optional[str],
+        coverage_file: Path,
+        baseline_coverage: Optional[CoverageMetrics],
+    ) -> ExecutionEvidence:
+        """Converts one completed sandbox session into immutable execution evidence."""
+        summary = self._runner.parse_test_outcomes(
+            stdout=raw_result.stdout,
+            stderr=raw_result.stderr,
+            exit_code=raw_result.exit_code,
+        )
+        coverage_metrics = self._read_coverage_report(coverage_file)
+        line_coverage_delta: Optional[float] = None
+        branch_coverage_delta: Optional[float] = None
+        if (
+            baseline_coverage is not None
+            and baseline_coverage.is_valid
+            and coverage_metrics.is_valid
+        ):
+            try:
+                line_coverage_delta = self._coverage_extractor.calculate_deltas(
+                    baseline_coverage.line_coverage,
+                    coverage_metrics.line_coverage,
+                )
+                branch_coverage_delta = self._coverage_extractor.calculate_deltas(
+                    baseline_coverage.branch_coverage,
+                    coverage_metrics.branch_coverage,
+                )
+            except ValueError:
+                pass
+
+        evidence = ExecutionEvidence(
+            evidence_id=f"ev-{uuid.uuid4().hex[:12]}",
+            run_id=run_id,
+            candidate_id=candidate_id,
+            exit_code=raw_result.exit_code,
+            stdout=raw_result.stdout,
+            stderr=raw_result.stderr,
+            duration_sec=raw_result.duration_sec,
+            timed_out=summary.timed_out,
+            line_coverage=coverage_metrics.line_coverage,
+            branch_coverage=coverage_metrics.branch_coverage,
+            line_coverage_delta=line_coverage_delta,
+            branch_coverage_delta=branch_coverage_delta,
+            traceback=summary.traceback,
+            created_at=datetime.now(timezone.utc),
+        )
+        self._last_summary = summary
+        self._last_coverage = coverage_metrics
+        return evidence
+
     def execute_candidate(
         self,
         plan: ExecutionPlan,
@@ -256,20 +323,19 @@ class ExecutionService:
         :param run_id: Optional explicit run identifier.
         :return: Populated ExecutionEvidence record.
         """
-        return self.execute(
+        evidences = self.execute(
             plan=plan,
             candidates=(candidate,),
             run_id=run_id,
-            candidate_id=candidate.candidate_id,
         )
+        return evidences[0]
 
     def execute(
         self,
         plan: ExecutionPlan,
         candidates: Sequence[TestCandidate] = (),
         run_id: Optional[str] = None,
-        candidate_id: Optional[str] = None,
-    ) -> ExecutionEvidence:
+    ) -> Tuple[ExecutionEvidence, ...]:
         """
         Orchestrates full sandboxed container execution and returns ExecutionEvidence.
         Stage 2 UC-05, Stage 3 Section 4.4.4.5.
@@ -277,14 +343,16 @@ class ExecutionService:
         :param plan: ExecutionPlan defining target symbols and routes.
         :param candidates: Sequence of TestCandidate entities to execute.
         :param run_id: Optional explicit run identifier; defaults to candidate.run_id or plan.plan_id.
-        :param candidate_id: Optional explicit candidate identifier for evidence linking.
-        :return: Immutable ExecutionEvidence containing exit codes, outputs, duration, and coverage.
+        :return: Immutable evidence records, one for each executed candidate or one
+                 regression-only record when candidates are absent.
         :raises SourceIntegrityError: If production source files were modified (INV-02).
         :raises StagingValidationError: If candidates were provided but none passed validation.
         :raises ValueError: If neither candidates nor existing tests are available for execution.
         """
         # The target repository root is mandatory for the read-only mount and INV-02 hash check.
         repository_root = self._require_repository_root()
+
+        self._last_evidences = ()
 
         # 1. Resolve effective identifiers
         effective_run_id = (
@@ -310,12 +378,6 @@ class ExecutionService:
             raise ValueError(
                 "No validated test candidates or existing tests available for execution."
             )
-
-        # Resolve effective candidate ID for relational evidence linkage
-        effective_candidate_id = (
-            candidate_id
-            or (passed_candidates[0].candidate_id if passed_candidates else "existing_tests")
-        )
 
         # 3. Step 1 of UC-05: Source integrity pre-hash recording (INV-02)
         pre_source_hash = compute_tree_hash(repository_root)
@@ -360,21 +422,11 @@ class ExecutionService:
                 scratch_dir: "/workspace/output",
             }
 
-            # 6. Construct deterministic pytest CLI tokens via PytestRunner
-            final_cov_report_path = "/workspace/output/coverage.json"
-            tests_paths: List[str] = []
-            if passed_candidates:
-                tests_paths.append("/workspace/tests")
-            tests_paths.extend(
+            # 6. Resolve the planner-selected regression paths once for every session.
+            regression_test_paths = [
                 f"/workspace/src/{existing_test.as_posix()}"
                 for existing_test in plan.existing_tests_to_run
-            )
-
-            final_cmd = self._runner.construct_command_for_paths(
-                tests_paths=tests_paths,
-                cov_source=self._cov_source,
-                cov_report_path=final_cov_report_path,
-            )
+            ]
 
             # 7. Configure sandbox confinement (INV-01)
             sandbox_config = SandboxConfig(
@@ -403,70 +455,81 @@ class ExecutionService:
                     cov_source=self._cov_source,
                     cov_report_path=baseline_cov_report_path,
                 )
-                self._execute_in_sandbox(sandbox_config, baseline_cmd)
+                self._execute_and_verify_source_integrity(
+                    sandbox_config,
+                    baseline_cmd,
+                    repository_root,
+                    pre_source_hash,
+                )
                 baseline_coverage = self._read_coverage_report(
                     scratch_dir / "coverage-baseline.json"
                 )
 
-            # 9. Execute the final selected test set and capture its telemetry.
-            raw_result = self._execute_in_sandbox(sandbox_config, final_cmd)
-
-            # 10. Step 9 of UC-05: Source integrity post-hash verification (INV-02)
-            self._verify_source_integrity(repository_root, pre_source_hash)
-
-            # 11. Parse test outcomes & captured telemetry
-            summary = self._runner.parse_test_outcomes(
-                stdout=raw_result.stdout,
-                stderr=raw_result.stderr,
-                exit_code=raw_result.exit_code,
-            )
-
-            # 12. Parse coverage telemetry and calculate deltas against a valid baseline.
-            coverage_metrics = self._read_coverage_report(scratch_dir / "coverage.json")
-            line_coverage_delta: Optional[float] = None
-            branch_coverage_delta: Optional[float] = None
-            if (
-                baseline_coverage is not None
-                and baseline_coverage.is_valid
-                and coverage_metrics.is_valid
-            ):
-                try:
-                    line_coverage_delta = self._coverage_extractor.calculate_deltas(
-                        baseline_coverage.line_coverage,
-                        coverage_metrics.line_coverage,
+            # 9. Each candidate is executed in its own session alongside the selected
+            # regression tests, so coverage and failure evidence remain attributable.
+            evidences: List[ExecutionEvidence] = []
+            if passed_candidates:
+                for index, candidate in enumerate(passed_candidates, start=1):
+                    staged_candidate_path = staging_area.get_staged_path(candidate.candidate_id)
+                    if staged_candidate_path is None:
+                        raise ExecutionError(
+                            f"Validated candidate '{candidate.candidate_id}' was not staged."
+                        )
+                    relative_candidate_path = staged_candidate_path.relative_to(
+                        staging_area.tests_dir
                     )
-                    branch_coverage_delta = self._coverage_extractor.calculate_deltas(
-                        baseline_coverage.branch_coverage,
-                        coverage_metrics.branch_coverage,
+                    candidate_test_path = (
+                        f"/workspace/tests/{relative_candidate_path.as_posix()}"
                     )
-                except ValueError:
-                    pass
+                    coverage_filename = (
+                        "coverage.json"
+                        if len(passed_candidates) == 1
+                        else f"coverage-candidate-{index}.json"
+                    )
+                    command = self._runner.construct_command_for_paths(
+                        tests_paths=[candidate_test_path, *regression_test_paths],
+                        cov_source=self._cov_source,
+                        cov_report_path=f"/workspace/output/{coverage_filename}",
+                    )
+                    raw_result = self._execute_and_verify_source_integrity(
+                        sandbox_config,
+                        command,
+                        repository_root,
+                        pre_source_hash,
+                    )
+                    evidences.append(
+                        self._build_evidence(
+                            raw_result=raw_result,
+                            run_id=effective_run_id,
+                            candidate_id=candidate.candidate_id,
+                            coverage_file=scratch_dir / coverage_filename,
+                            baseline_coverage=baseline_coverage,
+                        )
+                    )
+            else:
+                command = self._runner.construct_command_for_paths(
+                    tests_paths=regression_test_paths,
+                    cov_source=self._cov_source,
+                    cov_report_path="/workspace/output/coverage.json",
+                )
+                raw_result = self._execute_and_verify_source_integrity(
+                    sandbox_config,
+                    command,
+                    repository_root,
+                    pre_source_hash,
+                )
+                evidences.append(
+                    self._build_evidence(
+                        raw_result=raw_result,
+                        run_id=effective_run_id,
+                        candidate_id=None,
+                        coverage_file=scratch_dir / "coverage.json",
+                        baseline_coverage=None,
+                    )
+                )
 
-            # 13. Package immutable ExecutionEvidence entity
-            evidence_id = f"ev-{uuid.uuid4().hex[:12]}"
-            evidence = ExecutionEvidence(
-                evidence_id=evidence_id,
-                run_id=effective_run_id,
-                candidate_id=effective_candidate_id,
-                exit_code=raw_result.exit_code,
-                stdout=raw_result.stdout,
-                stderr=raw_result.stderr,
-                duration_sec=raw_result.duration_sec,
-                timed_out=summary.timed_out,
-                line_coverage=coverage_metrics.line_coverage,
-                branch_coverage=coverage_metrics.branch_coverage,
-                line_coverage_delta=line_coverage_delta,
-                branch_coverage_delta=branch_coverage_delta,
-                traceback=summary.traceback,
-                created_at=datetime.now(timezone.utc),
-            )
-
-            # Cache detailed telemetry for caller introspection
-            self._last_summary = summary
-            self._last_coverage = coverage_metrics
-            self._last_evidence = evidence
-
-            return evidence
+            self._last_evidences = tuple(evidences)
+            return self._last_evidences
 
         except Exception:
             # A sandbox failure does not waive INV-02. Verify the mount source

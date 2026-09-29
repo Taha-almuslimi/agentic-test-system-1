@@ -139,6 +139,12 @@ def _make_repository_root(tmp_path: Path) -> Path:
     return repository_root
 
 
+def _single_evidence(evidences: Tuple[ExecutionEvidence, ...]) -> ExecutionEvidence:
+    """Unpacks the single record expected by single-session test scenarios."""
+    assert len(evidences) == 1
+    return evidences[0]
+
+
 def test_execution_service_requires_repository_root_argument() -> None:
     """The repository root is a construction-time requirement for execution safety."""
     with pytest.raises(TypeError, match="missing 1 required positional argument: 'source_root'"):
@@ -220,7 +226,7 @@ def test_successful_candidate_execution(tmp_path: Path) -> None:
     plan = _make_plan()
     candidate = _make_candidate()
 
-    evidence = service.execute(plan, [candidate])
+    evidence = _single_evidence(service.execute(plan, [candidate]))
 
     # Assert ExecutionEvidence values
     assert evidence.exit_code == 0
@@ -244,7 +250,7 @@ def test_successful_candidate_execution(tmp_path: Path) -> None:
     assert service.last_coverage.is_valid is True
     assert service.last_coverage.covered_lines == 4
 
-    assert service.last_evidence == evidence
+    assert service.last_evidences == (evidence,)
 
     # Assert container cleanup (INV-01)
     assert sandbox.active_containers == []
@@ -255,7 +261,7 @@ def test_successful_candidate_execution(tmp_path: Path) -> None:
     call = sandbox.calls[0]
     assert call["command"] == [
         "pytest",
-        "/workspace/tests",
+        "/workspace/tests/test_calc.py",
         "--tb=short",
         "-v",
         "--cov=/workspace/src",
@@ -282,7 +288,7 @@ def test_candidate_execution_records_deltas_against_regression_baseline(
     )
     plan = _make_plan(existing_tests=(Path("tests/test_existing.py"),))
 
-    evidence = service.execute(plan, candidates=(_make_candidate(),))
+    evidence = _single_evidence(service.execute(plan, candidates=(_make_candidate(),)))
 
     assert evidence.line_coverage == 80.0
     assert evidence.branch_coverage == 75.0
@@ -293,11 +299,56 @@ def test_candidate_execution_records_deltas_against_regression_baseline(
     assert "--cov-report=json:/workspace/output/coverage-baseline.json" in sandbox.calls[0]["command"]
     assert sandbox.calls[1]["command"][:3] == [
         "pytest",
-        "/workspace/tests",
+        "/workspace/tests/test_calc.py",
         "/workspace/src/tests/test_existing.py",
     ]
     assert "--cov-report=json:/workspace/output/coverage.json" in sandbox.calls[1]["command"]
     assert len(sandbox.terminated_containers) == 2
+
+
+def test_multiple_candidates_receive_independent_evidence_and_deltas(
+    tmp_path: Path,
+) -> None:
+    """Each candidate runs separately against one shared regression baseline."""
+    sandbox = SimulatedContainerSandboxManager(
+        coverage_payloads=(
+            BASELINE_COVERAGE_JSON,
+            VALID_COVERAGE_JSON,
+            VALID_COVERAGE_JSON,
+        ),
+    )
+    sandbox.script_success(stdout="=== 1 passed in 0.1s ===\n")
+    sandbox.script_failure(exit_code=1, stdout="=== 1 failed in 0.2s ===\n")
+    sandbox.script_success(stdout="=== 2 passed in 0.3s ===\n")
+    service = ExecutionService(
+        sandbox_manager=sandbox,
+        source_root=_make_repository_root(tmp_path),
+    )
+    plan = _make_plan(existing_tests=(Path("tests/test_existing.py"),))
+    first_candidate = _make_candidate(candidate_id="cand-001")
+    second_candidate = _make_candidate(candidate_id="cand-002")
+
+    evidences = service.execute(plan, (first_candidate, second_candidate))
+
+    assert [evidence.candidate_id for evidence in evidences] == ["cand-001", "cand-002"]
+    assert [evidence.exit_code for evidence in evidences] == [1, 0]
+    assert [evidence.line_coverage_delta for evidence in evidences] == [20.0, 20.0]
+    assert [evidence.branch_coverage_delta for evidence in evidences] == [25.0, 25.0]
+    assert service.last_evidences == evidences
+    assert sandbox.call_count == 3
+    assert sandbox.calls[0]["command"][1] == "/workspace/src/tests/test_existing.py"
+    assert sandbox.calls[1]["command"][:3] == [
+        "pytest",
+        "/workspace/tests/test_calc.py",
+        "/workspace/src/tests/test_existing.py",
+    ]
+    assert sandbox.calls[2]["command"][:3] == [
+        "pytest",
+        "/workspace/tests/test_calc_cand-002.py",
+        "/workspace/src/tests/test_existing.py",
+    ]
+    assert "--cov-report=json:/workspace/output/coverage-candidate-1.json" in sandbox.calls[1]["command"]
+    assert "--cov-report=json:/workspace/output/coverage-candidate-2.json" in sandbox.calls[2]["command"]
 
 
 def test_failing_candidate_captures_traceback(tmp_path: Path) -> None:
@@ -327,7 +378,7 @@ def test_failing_candidate_captures_traceback(tmp_path: Path) -> None:
     plan = _make_plan()
     candidate = _make_candidate()
 
-    evidence = service.execute(plan, [candidate])
+    evidence = _single_evidence(service.execute(plan, [candidate]))
 
     assert evidence.exit_code == 1
     assert evidence.timed_out is False
@@ -358,7 +409,7 @@ def test_collection_error_captured(tmp_path: Path) -> None:
     plan = _make_plan()
     candidate = _make_candidate()
 
-    evidence = service.execute(plan, [candidate])
+    evidence = _single_evidence(service.execute(plan, [candidate]))
 
     assert evidence.exit_code == 2
     assert evidence.traceback is not None
@@ -385,7 +436,7 @@ def test_no_tests_collected_exit_code_5(tmp_path: Path) -> None:
     plan = _make_plan()
     candidate = _make_candidate()
 
-    evidence = service.execute(plan, [candidate])
+    evidence = _single_evidence(service.execute(plan, [candidate]))
 
     assert evidence.exit_code == 5
     assert evidence.timed_out is False
@@ -413,7 +464,7 @@ def test_execution_timeout_inv01(tmp_path: Path) -> None:
     plan = _make_plan()
     candidate = _make_candidate()
 
-    evidence = service.execute(plan, [candidate])
+    evidence = _single_evidence(service.execute(plan, [candidate]))
 
     assert evidence.exit_code == 124
     assert evidence.timed_out is True
@@ -437,7 +488,7 @@ def test_execution_oom_killed_inv01(tmp_path: Path) -> None:
     plan = _make_plan()
     candidate = _make_candidate()
 
-    evidence = service.execute(plan, [candidate])
+    evidence = _single_evidence(service.execute(plan, [candidate]))
 
     assert evidence.exit_code == 137
     assert service.last_summary is not None
@@ -504,7 +555,7 @@ def test_source_integrity_preservation_inv02(tmp_path: Path) -> None:
     plan = _make_plan()
     candidate = _make_candidate()
 
-    evidence = service.execute(plan, [candidate])
+    evidence = _single_evidence(service.execute(plan, [candidate]))
     assert evidence.exit_code == 0
     assert compute_tree_hash(source_dir) == pre_hash
 
@@ -578,7 +629,7 @@ def test_missing_coverage_json_handled_safely(tmp_path: Path) -> None:
     plan = _make_plan()
     candidate = _make_candidate()
 
-    evidence = service.execute(plan, [candidate])
+    evidence = _single_evidence(service.execute(plan, [candidate]))
 
     assert evidence.line_coverage == 0.0
     assert evidence.branch_coverage == 0.0
@@ -601,7 +652,7 @@ def test_malformed_coverage_json_handled_safely(tmp_path: Path) -> None:
     plan = _make_plan()
     candidate = _make_candidate()
 
-    evidence = service.execute(plan, [candidate])
+    evidence = _single_evidence(service.execute(plan, [candidate]))
 
     assert evidence.line_coverage == 0.0
     assert service.last_coverage is not None
@@ -740,10 +791,10 @@ def test_existing_tests_execution_without_candidates(tmp_path: Path) -> None:
         ),
     )
 
-    evidence = service.execute(plan, candidates=())
+    evidence = _single_evidence(service.execute(plan, candidates=()))
 
     assert evidence.exit_code == 0
-    assert evidence.candidate_id == "existing_tests"
+    assert evidence.candidate_id is None
     assert evidence.run_id == "plan-regression-01"
 
     assert sandbox.call_count == 1
@@ -770,7 +821,7 @@ def test_candidate_execution_includes_planned_regression_tests(tmp_path: Path) -
         ),
     )
 
-    evidence = service.execute(plan, candidates=(_make_candidate(),))
+    evidence = _single_evidence(service.execute(plan, candidates=(_make_candidate(),)))
 
     assert evidence.exit_code == 0
     assert sandbox.call_count == 2
@@ -780,7 +831,7 @@ def test_candidate_execution_includes_planned_regression_tests(tmp_path: Path) -
     ]
     assert sandbox.calls[1]["command"][:4] == [
         "pytest",
-        "/workspace/tests",
+        "/workspace/tests/test_calc.py",
         "/workspace/src/tests/test_existing_one.py",
         "/workspace/src/tests/test_existing_two.py",
     ]
@@ -828,7 +879,7 @@ def test_keep_artifacts_preserves_directories(tmp_path: Path) -> None:
     plan = _make_plan()
     cand = _make_candidate()
 
-    evidence = service.execute(plan, [cand])
+    evidence = _single_evidence(service.execute(plan, [cand]))
     assert evidence.exit_code == 0
 
     # Verify directories still exist
