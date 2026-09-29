@@ -169,7 +169,7 @@ class ExecutionEvidence(BaseModel):
 
     evidence_id: str
     run_id: str
-    candidate_id: str
+    candidate_id: Optional[str]
     exit_code: int
     stdout: str
     stderr: str

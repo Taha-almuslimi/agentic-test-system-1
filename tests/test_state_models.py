@@ -191,7 +191,7 @@ def test_workflow_state_creation_and_immutability() -> None:
     assert state.candidates == ()
     assert state.generation_retry_count == 0
     assert state.max_generation_retries == 2
-    assert state.evidence is None
+    assert state.evidences == ()
     assert state.diagnoses == ()
     assert state.final_status == "INITIALIZED"
     assert state.error_message is None
@@ -234,7 +234,7 @@ def test_workflow_state_rejects_invalid_field_types() -> None:
         WorkflowState(
             run_id="run-01",
             repo_path=Path("/tmp/repo"),
-            evidence="invalid_evidence",  # type: ignore[arg-type]
+            evidences=("invalid_evidence",),  # type: ignore[arg-type]
         )
 
     # 4. Reject invalid diagnoses list item (expects FailureDiagnosis, reject str or int)
@@ -296,7 +296,18 @@ def test_workflow_state_with_valid_stage3_entities() -> None:
         repo_path=Path("/tmp/repo"),
         plan=plan,
         candidates=(candidate,),
-        evidence=evidence,
+        evidences=(
+            evidence,
+            ExecutionEvidence(
+                evidence_id="ev-regression-001",
+                run_id="run-01",
+                candidate_id=None,
+                exit_code=0,
+                stdout="2 passed",
+                stderr="",
+                duration_sec=0.75,
+            ),
+        ),
         diagnoses=(diagnosis,),
     )
 
@@ -304,10 +315,12 @@ def test_workflow_state_with_valid_stage3_entities() -> None:
     assert state.plan.route == WorkflowRoute.ROUTE_TO_TEST_GENERATION
     assert len(state.candidates) == 1
     assert state.candidates[0].candidate_id == "cand-001"
-    assert state.evidence == evidence
-    assert state.evidence.exit_code == 0
-    assert state.evidence.line_coverage_delta == 0.15
-    assert state.evidence.branch_coverage_delta == 0.10
+    assert len(state.evidences) == 2
+    assert state.evidences[0] == evidence
+    assert state.evidences[0].exit_code == 0
+    assert state.evidences[0].line_coverage_delta == 0.15
+    assert state.evidences[0].branch_coverage_delta == 0.10
+    assert state.evidences[1].candidate_id is None
     assert len(state.diagnoses) == 1
     assert state.diagnoses[0].canonical_category == FailureCategory.APPLICATION_BUG
 
@@ -318,8 +331,9 @@ def test_workflow_state_with_valid_stage3_entities() -> None:
     assert reconstructed.plan is not None
     assert reconstructed.plan.plan_id == "plan-001"
     assert reconstructed.candidates[0].candidate_id == "cand-001"
-    assert reconstructed.evidence is not None
-    assert reconstructed.evidence.evidence_id == "ev-001"
+    assert len(reconstructed.evidences) == 2
+    assert reconstructed.evidences[0].evidence_id == "ev-001"
+    assert reconstructed.evidences[1].candidate_id is None
     assert reconstructed.diagnoses[0].diagnosis_id == "diag-001"
 
 

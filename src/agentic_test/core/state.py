@@ -42,7 +42,7 @@ class WorkflowState(BaseModel):
     max_generation_retries: int = 2
 
     # --- Populated during Sandbox Execution (UC-05) ---
-    evidence: Optional[ExecutionEvidence] = None
+    evidences: Tuple[ExecutionEvidence, ...] = Field(default_factory=tuple)
 
     # --- Populated during Failure Diagnosis (UC-06) ---
     diagnoses: Tuple[FailureDiagnosis, ...] = Field(default_factory=tuple)
