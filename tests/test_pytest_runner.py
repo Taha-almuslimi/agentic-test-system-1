@@ -24,8 +24,11 @@ def test_construct_command_deterministic_tokens_without_report() -> None:
     expected = [
         "pytest",
         "tests/test_calculator.py",
+        "--tb=short",
+        "-v",
         "--cov=src/calculator",
         "--cov-branch",
+        "--junitxml=/workspace/output/junit.xml",
         "-o",
         "cache_dir=/tmp/.pytest_cache",
     ]
@@ -44,8 +47,11 @@ def test_construct_command_deterministic_tokens_with_report() -> None:
     expected = [
         "pytest",
         "tests",
+        "--tb=short",
+        "-v",
         "--cov=src",
         "--cov-branch",
+        "--junitxml=/workspace/output/junit.xml",
         "--cov-report=json:/tmp/coverage.json",
         "-o",
         "cache_dir=/tmp/.pytest_cache",
@@ -72,8 +78,11 @@ def test_construct_command_for_paths_includes_every_explicit_test_path() -> None
         "/workspace/tests",
         "/workspace/src/tests/test_add.py",
         "/workspace/src/tests/test_mul.py",
+        "--tb=short",
+        "-v",
         "--cov=/workspace/src",
         "--cov-branch",
+        "--junitxml=/workspace/output/junit.xml",
         "--cov-report=json:/workspace/output/coverage.json",
         "-o",
         "cache_dir=/tmp/.pytest_cache",
@@ -98,9 +107,12 @@ def test_construct_command_normalizes_backslashes() -> None:
     )
 
     assert cmd[1] == "tests/unit/test_foo.py"
-    assert cmd[2] == "--cov=src/pkg/sub"
-    assert cmd[3] == "--cov-branch"
-    assert cmd[4] == "--cov-report=json:output/cov.json"
+    assert cmd[2] == "--tb=short"
+    assert cmd[3] == "-v"
+    assert cmd[4] == "--cov=src/pkg/sub"
+    assert cmd[5] == "--cov-branch"
+    assert cmd[6] == "--junitxml=/workspace/output/junit.xml"
+    assert cmd[7] == "--cov-report=json:output/cov.json"
 
 
 def test_construct_command_rejects_empty_paths() -> None:

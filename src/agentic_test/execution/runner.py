@@ -43,6 +43,8 @@ class PytestRunner:
     Stage 3 Section 4.4.4.5.
     """
 
+    _JUNIT_REPORT_PATH = "/workspace/output/junit.xml"
+
     def construct_command(
         self,
         tests_path: Union[Path, str],
@@ -65,8 +67,11 @@ class PytestRunner:
         tokens = [
             "pytest",
             clean_tests,
+            "--tb=short",
+            "-v",
             f"--cov={clean_cov}",
             "--cov-branch",
+            f"--junitxml={self._JUNIT_REPORT_PATH}",
         ]
 
         if cov_report_path is not None:
@@ -101,7 +106,15 @@ class PytestRunner:
             for index, test_path in enumerate(tests_paths)
         ]
         clean_cov = self._validate_and_normalize_path(cov_source, "cov_source")
-        tokens = ["pytest", *clean_tests, f"--cov={clean_cov}", "--cov-branch"]
+        tokens = [
+            "pytest",
+            *clean_tests,
+            "--tb=short",
+            "-v",
+            f"--cov={clean_cov}",
+            "--cov-branch",
+            f"--junitxml={self._JUNIT_REPORT_PATH}",
+        ]
 
         if cov_report_path is not None:
             clean_report = self._validate_and_normalize_path(
