@@ -177,6 +177,8 @@ class ExecutionEvidence(BaseModel):
     timed_out: bool = False
     line_coverage: float = 0.0
     branch_coverage: float = 0.0
+    line_coverage_delta: Optional[float] = None
+    branch_coverage_delta: Optional[float] = None
     traceback: Optional[str] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

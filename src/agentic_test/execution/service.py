@@ -20,6 +20,7 @@ from agentic_test.core.models import (
     ValidationStatus,
 )
 from agentic_test.core.protocols.sandbox import (
+    ExecutionRawResult,
     SandboxConfig,
     SandboxManager,
 )
@@ -200,6 +201,38 @@ class ExecutionService:
             )
         return self._source_root
 
+    def _execute_in_sandbox(
+        self,
+        sandbox_config: SandboxConfig,
+        command: List[str],
+    ) -> ExecutionRawResult:
+        """Runs one isolated pytest session and guarantees container cleanup."""
+        container_id: Optional[str] = None
+        try:
+            container_id = self._sandbox_manager.create_environment(sandbox_config)
+            return self._sandbox_manager.execute_command(
+                container_id=container_id,
+                command=command,
+                workdir="/workspace",
+            )
+        finally:
+            if container_id is not None:
+                try:
+                    self._sandbox_manager.cleanup(container_id)
+                except Exception:
+                    pass
+
+    def _read_coverage_report(self, coverage_file: Path) -> CoverageMetrics:
+        """Parses a coverage artifact or returns an explicit invalid metric result."""
+        if coverage_file.is_file():
+            return self._coverage_extractor.parse_coverage_json(coverage_file, strict=False)
+        return CoverageMetrics(
+            line_coverage=0.0,
+            branch_coverage=0.0,
+            is_valid=False,
+            error_message=f"Coverage report file '{coverage_file}' not found.",
+        )
+
     def execute_candidate(
         self,
         plan: ExecutionPlan,
@@ -319,7 +352,7 @@ class ExecutionService:
             }
 
             # 6. Construct deterministic pytest CLI tokens via PytestRunner
-            cov_report_path = "/workspace/output/coverage.json"
+            final_cov_report_path = "/workspace/output/coverage.json"
             tests_paths: List[str] = []
             if passed_candidates:
                 tests_paths.append("/workspace/tests")
@@ -328,10 +361,10 @@ class ExecutionService:
                 for existing_test in plan.existing_tests_to_run
             )
 
-            cmd = self._runner.construct_command_for_paths(
+            final_cmd = self._runner.construct_command_for_paths(
                 tests_paths=tests_paths,
                 cov_source=self._cov_source,
-                cov_report_path=cov_report_path,
+                cov_report_path=final_cov_report_path,
             )
 
             # 7. Configure sandbox confinement (INV-01)
@@ -347,23 +380,29 @@ class ExecutionService:
                 environment_vars=self._environment_vars,
             )
 
-            # 8. Container lifecycle execution with guaranteed cleanup
-            container_id: Optional[str] = None
-            try:
-                container_id = self._sandbox_manager.create_environment(sandbox_config)
-                raw_result = self._sandbox_manager.execute_command(
-                    container_id=container_id,
-                    command=cmd,
-                    workdir="/workspace",
+            # 8. Establish coverage baseline only when regression tests are available
+            # alongside generated candidates. The baseline excludes untrusted candidate code.
+            baseline_coverage: Optional[CoverageMetrics] = None
+            if passed_candidates and plan.existing_tests_to_run:
+                baseline_tests_paths = [
+                    f"/workspace/src/{existing_test.as_posix()}"
+                    for existing_test in plan.existing_tests_to_run
+                ]
+                baseline_cov_report_path = "/workspace/output/coverage-baseline.json"
+                baseline_cmd = self._runner.construct_command_for_paths(
+                    tests_paths=baseline_tests_paths,
+                    cov_source=self._cov_source,
+                    cov_report_path=baseline_cov_report_path,
                 )
-            finally:
-                if container_id is not None:
-                    try:
-                        self._sandbox_manager.cleanup(container_id)
-                    except Exception:
-                        pass
+                self._execute_in_sandbox(sandbox_config, baseline_cmd)
+                baseline_coverage = self._read_coverage_report(
+                    scratch_dir / "coverage-baseline.json"
+                )
 
-            # 9. Step 9 of UC-05: Source integrity post-hash verification (INV-02)
+            # 9. Execute the final selected test set and capture its telemetry.
+            raw_result = self._execute_in_sandbox(sandbox_config, final_cmd)
+
+            # 10. Step 9 of UC-05: Source integrity post-hash verification (INV-02)
             post_source_hash = compute_tree_hash(repository_root)
             if post_source_hash != pre_source_hash:
                 raise SourceIntegrityError(
@@ -374,30 +413,35 @@ class ExecutionService:
                     f"Halting immediately (UC-05 Extension 9a)."
                 )
 
-            # 10. Parse test outcomes & captured telemetry
+            # 11. Parse test outcomes & captured telemetry
             summary = self._runner.parse_test_outcomes(
                 stdout=raw_result.stdout,
                 stderr=raw_result.stderr,
                 exit_code=raw_result.exit_code,
             )
 
-            # 11. Parse coverage telemetry from generated coverage.json
-            coverage_file = scratch_dir / "coverage.json"
-            coverage_metrics: CoverageMetrics
-            if coverage_file.is_file():
-                coverage_metrics = self._coverage_extractor.parse_coverage_json(
-                    coverage_file,
-                    strict=False,
-                )
-            else:
-                coverage_metrics = CoverageMetrics(
-                    line_coverage=0.0,
-                    branch_coverage=0.0,
-                    is_valid=False,
-                    error_message=f"Coverage report file '{coverage_file}' not found.",
-                )
+            # 12. Parse coverage telemetry and calculate deltas against a valid baseline.
+            coverage_metrics = self._read_coverage_report(scratch_dir / "coverage.json")
+            line_coverage_delta: Optional[float] = None
+            branch_coverage_delta: Optional[float] = None
+            if (
+                baseline_coverage is not None
+                and baseline_coverage.is_valid
+                and coverage_metrics.is_valid
+            ):
+                try:
+                    line_coverage_delta = self._coverage_extractor.calculate_deltas(
+                        baseline_coverage.line_coverage,
+                        coverage_metrics.line_coverage,
+                    )
+                    branch_coverage_delta = self._coverage_extractor.calculate_deltas(
+                        baseline_coverage.branch_coverage,
+                        coverage_metrics.branch_coverage,
+                    )
+                except ValueError:
+                    pass
 
-            # 12. Package immutable ExecutionEvidence entity
+            # 13. Package immutable ExecutionEvidence entity
             evidence_id = f"ev-{uuid.uuid4().hex[:12]}"
             evidence = ExecutionEvidence(
                 evidence_id=evidence_id,
@@ -410,6 +454,8 @@ class ExecutionService:
                 timed_out=summary.timed_out,
                 line_coverage=coverage_metrics.line_coverage,
                 branch_coverage=coverage_metrics.branch_coverage,
+                line_coverage_delta=line_coverage_delta,
+                branch_coverage_delta=branch_coverage_delta,
                 traceback=summary.traceback,
                 created_at=datetime.now(timezone.utc),
             )
@@ -422,7 +468,7 @@ class ExecutionService:
             return evidence
 
         finally:
-            # 13. Fail-closed ephemeral mount teardown
+            # 14. Fail-closed ephemeral mount teardown
             if not self._keep_artifacts:
                 if staging_area is not None:
                     try:

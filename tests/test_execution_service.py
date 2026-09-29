@@ -47,12 +47,14 @@ class SimulatedContainerSandboxManager(MockSandboxManager):
     def __init__(
         self,
         coverage_payload: Optional[str] = None,
+        coverage_payloads: Optional[Sequence[Optional[str]]] = None,
         tamper_target: Optional[Path] = None,
         default_result: Optional[ExecutionRawResult] = None,
         execute_error: Optional[Exception] = None,
     ) -> None:
         super().__init__(default_result=default_result)
         self.coverage_payload = coverage_payload
+        self.coverage_payloads = list(coverage_payloads or ())
         self.tamper_target = tamper_target
         self.execute_error = execute_error
 
@@ -67,13 +69,23 @@ class SimulatedContainerSandboxManager(MockSandboxManager):
 
         config = self._containers[container_id]
 
-        # Simulate writing coverage.json to /workspace/output
-        if self.coverage_payload is not None:
+        # Simulate writing the coverage artifact requested by the pytest command.
+        coverage_payload = (
+            self.coverage_payloads.pop(0)
+            if self.coverage_payloads
+            else self.coverage_payload
+        )
+        if coverage_payload is not None:
+            report_option = next(
+                (token for token in command if token.startswith("--cov-report=json:")),
+                "--cov-report=json:/workspace/output/coverage.json",
+            )
+            report_filename = Path(report_option.split(":", 1)[1]).name
             for host_path, container_path in config.read_write_mounts.items():
                 if container_path == "/workspace/output":
                     host_path.mkdir(parents=True, exist_ok=True)
-                    (host_path / "coverage.json").write_text(
-                        self.coverage_payload, encoding="utf-8"
+                    (host_path / report_filename).write_text(
+                        coverage_payload, encoding="utf-8"
                     )
 
         # Simulate host tampering to verify INV-02 violation detection
@@ -155,6 +167,20 @@ VALID_COVERAGE_JSON = json.dumps({
 })
 
 
+BASELINE_COVERAGE_JSON = json.dumps({
+    "totals": {
+        "covered_lines": 3,
+        "num_statements": 5,
+        "percent_covered": 60.0,
+        "missing_lines": 2,
+        "excluded_lines": 0,
+        "covered_branches": 2,
+        "num_branches": 4,
+        "missing_branches": 2,
+    },
+})
+
+
 # =====================================================================
 # 1. Successful Execution & Telemetry Extraction Tests
 # =====================================================================
@@ -196,6 +222,8 @@ def test_successful_candidate_execution(tmp_path: Path) -> None:
     assert evidence.timed_out is False
     assert evidence.line_coverage == 80.0
     assert evidence.branch_coverage == 75.0
+    assert evidence.line_coverage_delta is None
+    assert evidence.branch_coverage_delta is None
     assert evidence.traceback is None
     assert evidence.candidate_id == candidate.candidate_id
     assert evidence.run_id == candidate.run_id
@@ -228,6 +256,39 @@ def test_successful_candidate_execution(tmp_path: Path) -> None:
         "-o",
         "cache_dir=/tmp/.pytest_cache",
     ]
+
+
+def test_candidate_execution_records_deltas_against_regression_baseline(
+    tmp_path: Path,
+) -> None:
+    """Generated-test coverage is compared with the selected regression baseline."""
+    sandbox = SimulatedContainerSandboxManager(
+        coverage_payloads=(BASELINE_COVERAGE_JSON, VALID_COVERAGE_JSON),
+    )
+    sandbox.script_success(stdout="=== 1 passed in 0.1s ===\n")
+    sandbox.script_success(stdout="=== 3 passed in 0.2s ===\n")
+    service = ExecutionService(
+        sandbox_manager=sandbox,
+        source_root=_make_repository_root(tmp_path),
+    )
+    plan = _make_plan(existing_tests=(Path("tests/test_existing.py"),))
+
+    evidence = service.execute(plan, candidates=(_make_candidate(),))
+
+    assert evidence.line_coverage == 80.0
+    assert evidence.branch_coverage == 75.0
+    assert evidence.line_coverage_delta == 20.0
+    assert evidence.branch_coverage_delta == 25.0
+    assert sandbox.call_count == 2
+    assert sandbox.calls[0]["command"][1] == "/workspace/src/tests/test_existing.py"
+    assert "--cov-report=json:/workspace/output/coverage-baseline.json" in sandbox.calls[0]["command"]
+    assert sandbox.calls[1]["command"][:3] == [
+        "pytest",
+        "/workspace/tests",
+        "/workspace/src/tests/test_existing.py",
+    ]
+    assert "--cov-report=json:/workspace/output/coverage.json" in sandbox.calls[1]["command"]
+    assert len(sandbox.terminated_containers) == 2
 
 
 def test_failing_candidate_captures_traceback(tmp_path: Path) -> None:
@@ -683,7 +744,12 @@ def test_candidate_execution_includes_planned_regression_tests(tmp_path: Path) -
     evidence = service.execute(plan, candidates=(_make_candidate(),))
 
     assert evidence.exit_code == 0
-    assert sandbox.calls[0]["command"][:4] == [
+    assert sandbox.call_count == 2
+    assert sandbox.calls[0]["command"][1:3] == [
+        "/workspace/src/tests/test_existing_one.py",
+        "/workspace/src/tests/test_existing_two.py",
+    ]
+    assert sandbox.calls[1]["command"][:4] == [
         "pytest",
         "/workspace/tests",
         "/workspace/src/tests/test_existing_one.py",

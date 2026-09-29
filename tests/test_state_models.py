@@ -277,6 +277,8 @@ def test_workflow_state_with_valid_stage3_entities() -> None:
         duration_sec=1.25,
         line_coverage=0.95,
         branch_coverage=0.90,
+        line_coverage_delta=0.15,
+        branch_coverage_delta=0.10,
     )
 
     diagnosis = FailureDiagnosis(
@@ -304,6 +306,8 @@ def test_workflow_state_with_valid_stage3_entities() -> None:
     assert state.candidates[0].candidate_id == "cand-001"
     assert state.evidence == evidence
     assert state.evidence.exit_code == 0
+    assert state.evidence.line_coverage_delta == 0.15
+    assert state.evidence.branch_coverage_delta == 0.10
     assert len(state.diagnoses) == 1
     assert state.diagnoses[0].canonical_category == FailureCategory.APPLICATION_BUG
 
