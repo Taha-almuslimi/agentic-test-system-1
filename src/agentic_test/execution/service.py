@@ -320,14 +320,16 @@ class ExecutionService:
 
             # 6. Construct deterministic pytest CLI tokens via PytestRunner
             cov_report_path = "/workspace/output/coverage.json"
+            tests_paths: List[str] = []
             if passed_candidates:
-                tests_path = "/workspace/tests"
-            else:
-                first_test = plan.existing_tests_to_run[0]
-                tests_path = f"/workspace/src/{first_test.as_posix()}"
+                tests_paths.append("/workspace/tests")
+            tests_paths.extend(
+                f"/workspace/src/{existing_test.as_posix()}"
+                for existing_test in plan.existing_tests_to_run
+            )
 
-            cmd = self._runner.construct_command(
-                tests_path=tests_path,
+            cmd = self._runner.construct_command_for_paths(
+                tests_paths=tests_paths,
                 cov_source=self._cov_source,
                 cov_report_path=cov_report_path,
             )

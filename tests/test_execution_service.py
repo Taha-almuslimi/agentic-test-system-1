@@ -643,7 +643,10 @@ def test_existing_tests_execution_without_candidates(tmp_path: Path) -> None:
     )
     plan = _make_plan(
         plan_id="plan-regression-01",
-        existing_tests=(Path("tests/test_suite.py"),),
+        existing_tests=(
+            Path("tests/test_suite.py"),
+            Path("tests/test_regression.py"),
+        ),
     )
 
     evidence = service.execute(plan, candidates=())
@@ -655,7 +658,36 @@ def test_existing_tests_execution_without_candidates(tmp_path: Path) -> None:
     assert sandbox.call_count == 1
     cmd = sandbox.calls[0]["command"]
     assert cmd[0] == "pytest"
-    assert cmd[1] == "/workspace/src/tests/test_suite.py"
+    assert cmd[1:3] == [
+        "/workspace/src/tests/test_suite.py",
+        "/workspace/src/tests/test_regression.py",
+    ]
+
+
+def test_candidate_execution_includes_planned_regression_tests(tmp_path: Path) -> None:
+    """Generated candidates and planner-selected regressions share one pytest session."""
+    sandbox = SimulatedContainerSandboxManager()
+    sandbox.script_success(stdout="=== 3 passed in 0.2s ===\n")
+    service = ExecutionService(
+        sandbox_manager=sandbox,
+        source_root=_make_repository_root(tmp_path),
+    )
+    plan = _make_plan(
+        existing_tests=(
+            Path("tests/test_existing_one.py"),
+            Path("tests/test_existing_two.py"),
+        ),
+    )
+
+    evidence = service.execute(plan, candidates=(_make_candidate(),))
+
+    assert evidence.exit_code == 0
+    assert sandbox.calls[0]["command"][:4] == [
+        "pytest",
+        "/workspace/tests",
+        "/workspace/src/tests/test_existing_one.py",
+        "/workspace/src/tests/test_existing_two.py",
+    ]
 
 
 def test_execute_candidate_convenience_method(tmp_path: Path) -> None:

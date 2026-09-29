@@ -51,6 +51,40 @@ def test_construct_command_deterministic_tokens_with_report() -> None:
     assert cmd == expected
 
 
+def test_construct_command_for_paths_includes_every_explicit_test_path() -> None:
+    """Regression execution keeps the planner's complete ordered test selection."""
+    runner = PytestRunner()
+
+    cmd = runner.construct_command_for_paths(
+        tests_paths=(
+            "/workspace/tests",
+            Path("/workspace/src/tests/test_add.py"),
+            Path("/workspace/src/tests/test_mul.py"),
+        ),
+        cov_source="/workspace/src",
+        cov_report_path="/workspace/output/coverage.json",
+    )
+
+    assert cmd == [
+        "pytest",
+        "/workspace/tests",
+        "/workspace/src/tests/test_add.py",
+        "/workspace/src/tests/test_mul.py",
+        "--cov=/workspace/src",
+        "--cov-report=json:/workspace/output/coverage.json",
+        "-o",
+        "cache_dir=/tmp/.pytest_cache",
+    ]
+
+
+def test_construct_command_for_paths_rejects_empty_sequence() -> None:
+    """An execution command cannot be built without an explicit test target."""
+    runner = PytestRunner()
+
+    with pytest.raises(ValueError, match="'tests_paths' cannot be empty"):
+        runner.construct_command_for_paths(tests_paths=(), cov_source="src")
+
+
 def test_construct_command_normalizes_backslashes() -> None:
     """Verifies that Windows backslashes are normalized to POSIX forward slashes."""
     runner = PytestRunner()

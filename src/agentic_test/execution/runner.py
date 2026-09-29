@@ -6,7 +6,7 @@ Iteration 1.5 Slice C.1.
 
 from pathlib import Path
 import re
-from typing import List, Optional, Union
+from typing import List, Optional, Sequence, Union
 from pydantic import BaseModel, ConfigDict
 
 
@@ -67,6 +67,40 @@ class PytestRunner:
             clean_tests,
             f"--cov={clean_cov}",
         ]
+
+        if cov_report_path is not None:
+            clean_report = self._validate_and_normalize_path(
+                cov_report_path, "cov_report_path"
+            )
+            tokens.append(f"--cov-report=json:{clean_report}")
+
+        tokens.extend(["-o", "cache_dir=/tmp/.pytest_cache"])
+        return tokens
+
+    def construct_command_for_paths(
+        self,
+        tests_paths: Sequence[Union[Path, str]],
+        cov_source: Union[Path, str],
+        cov_report_path: Optional[Union[Path, str]] = None,
+    ) -> List[str]:
+        """
+        Constructs one pytest command for several explicit test paths.
+
+        :param tests_paths: Non-empty ordered test file or directory paths inside the container.
+        :param cov_source: Path to source code root for coverage instrumentation.
+        :param cov_report_path: Optional path for JSON coverage report output.
+        :return: Deterministic list of CLI command tokens.
+        :raises ValueError: If no test paths are supplied or any supplied path is unsafe.
+        """
+        if not tests_paths:
+            raise ValueError("'tests_paths' cannot be empty")
+
+        clean_tests = [
+            self._validate_and_normalize_path(test_path, f"tests_paths[{index}]")
+            for index, test_path in enumerate(tests_paths)
+        ]
+        clean_cov = self._validate_and_normalize_path(cov_source, "cov_source")
+        tokens = ["pytest", *clean_tests, f"--cov={clean_cov}"]
 
         if cov_report_path is not None:
             clean_report = self._validate_and_normalize_path(
