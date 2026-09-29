@@ -9,6 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from agentic_test.core.models import TestCandidate, ValidationStatus
+from agentic_test.execution.mock_sandbox import MockSandboxManager
 from agentic_test.validation.base import BaseValidator
 from agentic_test.validation.models import ValidationResult
 from agentic_test.validation.pipeline import ValidationPipeline
@@ -308,13 +309,97 @@ def test_validation_pipeline_preserves_pre_quarantined_candidate() -> None:
 
 def test_validation_pipeline_gate_3_blocked_invariant() -> None:
     """
-    Confirms host validation pipeline contains ONLY static gates (Gate 1 and Gate 2).
-    Gate 3 (pytest collection) is blocked on host under INV-01.
+    The default pipeline contains ONLY static gates. Gate 3 needs an injected
+    isolated sandbox and repository root, so it can never run on the host.
     """
     pipeline = ValidationPipeline()
     gate_names = [v.gate_name for v in pipeline.validators]
     assert gate_names == ["GATE_1_SYNTAX", "GATE_2_SECURITY"]
     assert "GATE_3_COLLECTION" not in gate_names
+
+
+def test_validation_pipeline_runs_gate_3_collection_in_sandbox(tmp_path: Path) -> None:
+    """Gate 3 stages and collects a safe candidate in the isolated sandbox."""
+    source_root = tmp_path / "repository"
+    source_root.mkdir()
+    collection_staging_root = tmp_path / "collection-staging"
+    collection_staging_root.mkdir()
+    sandbox = MockSandboxManager()
+    sandbox.script_success(stdout="collected 1 item\n")
+    pipeline = ValidationPipeline(
+        sandbox_manager=sandbox,
+        source_root=source_root,
+        collection_staging_root=collection_staging_root,
+    )
+
+    updated_cand, result = pipeline.validate_candidate(
+        _make_candidate("def test_clean():\n    assert 2 + 2 == 4\n")
+    )
+
+    assert updated_cand.validation_status == ValidationStatus.PASSED
+    assert result.passed is True
+    assert result.gate == "GATE_3_COLLECTION"
+    assert sandbox.call_count == 1
+    assert sandbox.calls[0]["command"] == [
+        "pytest",
+        "--collect-only",
+        "/workspace/tests",
+        "-o",
+        "cache_dir=/tmp/.pytest_cache",
+    ]
+    assert sandbox.calls[0]["workdir"] == "/workspace"
+    config = next(iter(sandbox.created_configs.values()))
+    assert config.read_only_mounts[source_root] == "/workspace/src"
+    assert "/workspace/tests" in config.read_only_mounts.values()
+    assert sandbox.active_containers == []
+
+
+def test_validation_pipeline_rejects_gate_3_collection_error(tmp_path: Path) -> None:
+    """A non-zero pytest collection exit rejects the candidate at Gate 3."""
+    source_root = tmp_path / "repository"
+    source_root.mkdir()
+    collection_staging_root = tmp_path / "collection-staging"
+    collection_staging_root.mkdir()
+    sandbox = MockSandboxManager()
+    sandbox.script_failure(
+        exit_code=2,
+        stdout="ERROR collecting test_candidate.py\n",
+    )
+    pipeline = ValidationPipeline(
+        sandbox_manager=sandbox,
+        source_root=source_root,
+        collection_staging_root=collection_staging_root,
+    )
+
+    updated_cand, result = pipeline.validate_candidate(
+        _make_candidate("def test_clean():\n    assert 2 + 2 == 4\n")
+    )
+
+    assert updated_cand.validation_status == ValidationStatus.REJECTED_COLLECTION
+    assert result.passed is False
+    assert result.gate == "GATE_3_COLLECTION"
+    assert "exit code 2" in (result.error_message or "")
+    assert result.diagnostics == ("ERROR collecting test_candidate.py",)
+    assert sandbox.active_containers == []
+
+
+def test_validation_pipeline_short_circuits_before_gate_3(tmp_path: Path) -> None:
+    """Syntax and security rejection prevents any sandbox collection call."""
+    source_root = tmp_path / "repository"
+    source_root.mkdir()
+    sandbox = MockSandboxManager()
+    pipeline = ValidationPipeline(sandbox_manager=sandbox, source_root=source_root)
+
+    updated_cand, result = pipeline.validate_candidate(
+        _make_candidate(
+            code="def test_unsafe():\n    subprocess.run(['echo', 'unsafe'])\n",
+            imports=("import subprocess",),
+        )
+    )
+
+    assert updated_cand.validation_status == ValidationStatus.REJECTED_SECURITY
+    assert result.gate == "GATE_2_SECURITY"
+    assert sandbox.call_count == 0
 
 
 # -------------------------------------------------------------------------
