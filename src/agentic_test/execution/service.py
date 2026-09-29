@@ -107,9 +107,9 @@ class ExecutionService:
     def __init__(
         self,
         sandbox_manager: SandboxManager,
+        source_root: Path,
         runner: Optional[PytestRunner] = None,
         coverage_extractor: Optional[CoverageExtractor] = None,
-        source_root: Optional[Path] = None,
         staging_root: Optional[Path] = None,
         scratch_root: Optional[Path] = None,
         timeout_sec: float = 30.0,
@@ -143,7 +143,7 @@ class ExecutionService:
         self._sandbox_manager = sandbox_manager
         self._runner = runner or PytestRunner()
         self._coverage_extractor = coverage_extractor or CoverageExtractor()
-        self._source_root = source_root.resolve() if source_root else None
+        self._source_root = source_root.resolve()
         self._staging_root = staging_root.resolve() if staging_root else None
         self._scratch_root = scratch_root.resolve() if scratch_root else None
         self._timeout_sec = timeout_sec
@@ -191,10 +191,6 @@ class ExecutionService:
 
     def _require_repository_root(self) -> Path:
         """Returns the configured target repository root or fails before sandbox setup."""
-        if self._source_root is None:
-            raise ExecutionError(
-                "Execution requires source_root to identify the target repository root."
-            )
         if not self._source_root.is_dir():
             raise ExecutionError(
                 f"Execution source_root must be an existing directory: {self._source_root}"

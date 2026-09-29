@@ -139,6 +139,12 @@ def _make_repository_root(tmp_path: Path) -> Path:
     return repository_root
 
 
+def test_execution_service_requires_repository_root_argument() -> None:
+    """The repository root is a construction-time requirement for execution safety."""
+    with pytest.raises(TypeError, match="missing 1 required positional argument: 'source_root'"):
+        ExecutionService(sandbox_manager=SimulatedContainerSandboxManager())
+
+
 VALID_COVERAGE_JSON = json.dumps({
     "meta": {"version": "7.4.4"},
     "files": {
