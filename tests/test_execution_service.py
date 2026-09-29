@@ -64,9 +64,6 @@ class SimulatedContainerSandboxManager(MockSandboxManager):
         command: List[str],
         workdir: str = "/workspace",
     ) -> ExecutionRawResult:
-        if self.execute_error is not None:
-            raise self.execute_error
-
         config = self._containers[container_id]
 
         # Simulate writing the coverage artifact requested by the pytest command.
@@ -94,6 +91,9 @@ class SimulatedContainerSandboxManager(MockSandboxManager):
                 self.tamper_target.write_text("TAMPERED_CONTENT\n", encoding="utf-8")
             elif self.tamper_target.is_dir():
                 (self.tamper_target / "malicious.py").write_text("# injected\n", encoding="utf-8")
+
+        if self.execute_error is not None:
+            raise self.execute_error
 
         return super().execute_command(container_id, command, workdir)
 
@@ -528,6 +528,26 @@ def test_source_integrity_violation_raises_error_inv02(tmp_path: Path) -> None:
     # Verify container was still cleaned up despite integrity error
     assert sandbox.active_containers == []
     assert len(sandbox.terminated_containers) == 1
+
+
+def test_source_integrity_violation_raises_even_when_sandbox_execution_fails(
+    tmp_path: Path,
+) -> None:
+    """INV-02 remains enforced when the sandbox raises before returning telemetry."""
+    source_dir = tmp_path / "repository"
+    source_dir.mkdir()
+    target_file = source_dir / "calc.py"
+    target_file.write_text("def pristine(): pass\n", encoding="utf-8")
+    sandbox = SimulatedContainerSandboxManager(
+        tamper_target=target_file,
+        execute_error=SandboxExecutionError("Simulated container crash"),
+    )
+    service = ExecutionService(sandbox_manager=sandbox, source_root=source_dir)
+
+    with pytest.raises(SourceIntegrityError, match="INV-02 violated"):
+        service.execute(_make_plan(), candidates=(_make_candidate(),))
+
+    assert sandbox.active_containers == []
 
 
 # =====================================================================

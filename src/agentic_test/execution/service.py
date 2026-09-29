@@ -233,6 +233,19 @@ class ExecutionService:
             error_message=f"Coverage report file '{coverage_file}' not found.",
         )
 
+    @staticmethod
+    def _verify_source_integrity(repository_root: Path, pre_source_hash: str) -> None:
+        """Raises when the target repository changed during a sandbox session."""
+        post_source_hash = compute_tree_hash(repository_root)
+        if post_source_hash != pre_source_hash:
+            raise SourceIntegrityError(
+                f"Safety Invariant INV-02 violated: Production source files under "
+                f"'{repository_root}' were modified during test execution! "
+                f"Pre-execution SHA-256: {pre_source_hash}, "
+                f"Post-execution SHA-256: {post_source_hash}. "
+                f"Halting immediately (UC-05 Extension 9a)."
+            )
+
     def execute_candidate(
         self,
         plan: ExecutionPlan,
@@ -403,15 +416,7 @@ class ExecutionService:
             raw_result = self._execute_in_sandbox(sandbox_config, final_cmd)
 
             # 10. Step 9 of UC-05: Source integrity post-hash verification (INV-02)
-            post_source_hash = compute_tree_hash(repository_root)
-            if post_source_hash != pre_source_hash:
-                raise SourceIntegrityError(
-                    f"Safety Invariant INV-02 violated: Production source files under "
-                    f"'{repository_root}' were modified during test execution! "
-                    f"Pre-execution SHA-256: {pre_source_hash}, "
-                    f"Post-execution SHA-256: {post_source_hash}. "
-                    f"Halting immediately (UC-05 Extension 9a)."
-                )
+            self._verify_source_integrity(repository_root, pre_source_hash)
 
             # 11. Parse test outcomes & captured telemetry
             summary = self._runner.parse_test_outcomes(
@@ -466,6 +471,12 @@ class ExecutionService:
             self._last_evidence = evidence
 
             return evidence
+
+        except Exception:
+            # A sandbox failure does not waive INV-02. Verify the mount source
+            # before propagating the original error; integrity violations take priority.
+            self._verify_source_integrity(repository_root, pre_source_hash)
+            raise
 
         finally:
             # 14. Fail-closed ephemeral mount teardown
