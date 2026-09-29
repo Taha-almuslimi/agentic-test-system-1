@@ -126,7 +126,8 @@ class ExecutionService:
         :param sandbox_manager: Real or mock implementation of SandboxManager protocol.
         :param runner: PytestRunner instance for command construction and telemetry parsing.
         :param coverage_extractor: CoverageExtractor instance for JSON coverage parsing.
-        :param source_root: Path to repository application source on host (mounted at /workspace/src:ro).
+        :param source_root: Target repository root on the host (mounted at /workspace/src:ro).
+                            It must be an existing directory before execution begins.
         :param staging_root: Root path for ephemeral candidate staging (mounted at /workspace/tests:ro).
         :param scratch_root: Root path for ephemeral execution outputs (mounted at /workspace/output:rw).
         :param timeout_sec: Container execution wall-clock timeout ceiling (default 30.0s, FR-13).
@@ -187,6 +188,18 @@ class ExecutionService:
         """Populated ExecutionEvidence record from the most recent execution, if available."""
         return self._last_evidence
 
+    def _require_repository_root(self) -> Path:
+        """Returns the configured target repository root or fails before sandbox setup."""
+        if self._source_root is None:
+            raise ExecutionError(
+                "Execution requires source_root to identify the target repository root."
+            )
+        if not self._source_root.is_dir():
+            raise ExecutionError(
+                f"Execution source_root must be an existing directory: {self._source_root}"
+            )
+        return self._source_root
+
     def execute_candidate(
         self,
         plan: ExecutionPlan,
@@ -228,6 +241,9 @@ class ExecutionService:
         :raises StagingValidationError: If candidates were provided but none passed validation.
         :raises ValueError: If neither candidates nor existing tests are available for execution.
         """
+        # The target repository root is mandatory for the read-only mount and INV-02 hash check.
+        repository_root = self._require_repository_root()
+
         # 1. Resolve effective identifiers
         effective_run_id = (
             run_id
@@ -260,9 +276,7 @@ class ExecutionService:
         )
 
         # 3. Step 1 of UC-05: Source integrity pre-hash recording (INV-02)
-        pre_source_hash: Optional[str] = None
-        if self._source_root is not None and self._source_root.exists():
-            pre_source_hash = compute_tree_hash(self._source_root)
+        pre_source_hash = compute_tree_hash(repository_root)
 
         # 4. Set up ephemeral staging area and scratch output directory
         staging_area: Optional[CandidateStagingArea] = None
@@ -295,8 +309,7 @@ class ExecutionService:
 
             # 5. Build volume isolation mounts (Stage 3 Section 4.4.4.5)
             read_only_mounts: Dict[Path, str] = {}
-            if self._source_root is not None and self._source_root.exists():
-                read_only_mounts[self._source_root] = "/workspace/src"
+            read_only_mounts[repository_root] = "/workspace/src"
 
             if passed_candidates:
                 read_only_mounts[staging_area.tests_dir] = "/workspace/tests"
@@ -349,16 +362,15 @@ class ExecutionService:
                         pass
 
             # 9. Step 9 of UC-05: Source integrity post-hash verification (INV-02)
-            if pre_source_hash is not None and self._source_root is not None:
-                post_source_hash = compute_tree_hash(self._source_root)
-                if post_source_hash != pre_source_hash:
-                    raise SourceIntegrityError(
-                        f"Safety Invariant INV-02 violated: Production source files under "
-                        f"'{self._source_root}' were modified during test execution! "
-                        f"Pre-execution SHA-256: {pre_source_hash}, "
-                        f"Post-execution SHA-256: {post_source_hash}. "
-                        f"Halting immediately (UC-05 Extension 9a)."
-                    )
+            post_source_hash = compute_tree_hash(repository_root)
+            if post_source_hash != pre_source_hash:
+                raise SourceIntegrityError(
+                    f"Safety Invariant INV-02 violated: Production source files under "
+                    f"'{repository_root}' were modified during test execution! "
+                    f"Pre-execution SHA-256: {pre_source_hash}, "
+                    f"Post-execution SHA-256: {post_source_hash}. "
+                    f"Halting immediately (UC-05 Extension 9a)."
+                )
 
             # 10. Parse test outcomes & captured telemetry
             summary = self._runner.parse_test_outcomes(

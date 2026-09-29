@@ -120,6 +120,13 @@ def _make_plan(
     )
 
 
+def _make_repository_root(tmp_path: Path) -> Path:
+    """Creates an empty target repository root for execution-service tests."""
+    repository_root = tmp_path / "repository"
+    repository_root.mkdir(exist_ok=True)
+    return repository_root
+
+
 VALID_COVERAGE_JSON = json.dumps({
     "meta": {"version": "7.4.4"},
     "files": {
@@ -242,7 +249,10 @@ def test_failing_candidate_captures_traceback(tmp_path: Path) -> None:
         duration_sec=0.15,
     )
 
-    service = ExecutionService(sandbox_manager=sandbox)
+    service = ExecutionService(
+        sandbox_manager=sandbox,
+        source_root=_make_repository_root(tmp_path),
+    )
     plan = _make_plan()
     candidate = _make_candidate()
 
@@ -270,7 +280,10 @@ def test_collection_error_captured(tmp_path: Path) -> None:
         duration_sec=0.08,
     )
 
-    service = ExecutionService(sandbox_manager=sandbox)
+    service = ExecutionService(
+        sandbox_manager=sandbox,
+        source_root=_make_repository_root(tmp_path),
+    )
     plan = _make_plan()
     candidate = _make_candidate()
 
@@ -294,7 +307,10 @@ def test_no_tests_collected_exit_code_5(tmp_path: Path) -> None:
         duration_sec=0.02,
     )
 
-    service = ExecutionService(sandbox_manager=sandbox)
+    service = ExecutionService(
+        sandbox_manager=sandbox,
+        source_root=_make_repository_root(tmp_path),
+    )
     plan = _make_plan()
     candidate = _make_candidate()
 
@@ -310,7 +326,7 @@ def test_no_tests_collected_exit_code_5(tmp_path: Path) -> None:
 # 2. Timeout & Resource Limits Confinement Tests (INV-01)
 # =====================================================================
 
-def test_execution_timeout_inv01() -> None:
+def test_execution_timeout_inv01(tmp_path: Path) -> None:
     """
     Verifies that container timeout (exit code 124) sets timed_out=True
     on the resulting ExecutionEvidence entity (UC-05 Extension 6a).
@@ -318,7 +334,11 @@ def test_execution_timeout_inv01() -> None:
     sandbox = SimulatedContainerSandboxManager()
     sandbox.script_timeout(duration_sec=30.0)
 
-    service = ExecutionService(sandbox_manager=sandbox, timeout_sec=30.0)
+    service = ExecutionService(
+        sandbox_manager=sandbox,
+        source_root=_make_repository_root(tmp_path),
+        timeout_sec=30.0,
+    )
     plan = _make_plan()
     candidate = _make_candidate()
 
@@ -331,7 +351,7 @@ def test_execution_timeout_inv01() -> None:
     assert service.last_summary.timed_out is True
 
 
-def test_execution_oom_killed_inv01() -> None:
+def test_execution_oom_killed_inv01(tmp_path: Path) -> None:
     """
     Verifies that container memory exhaustion (exit code 137) is parsed as OOM
     (UC-05 Extension 6b).
@@ -339,7 +359,10 @@ def test_execution_oom_killed_inv01() -> None:
     sandbox = SimulatedContainerSandboxManager()
     sandbox.script_oom(duration_sec=0.5)
 
-    service = ExecutionService(sandbox_manager=sandbox)
+    service = ExecutionService(
+        sandbox_manager=sandbox,
+        source_root=_make_repository_root(tmp_path),
+    )
     plan = _make_plan()
     candidate = _make_candidate()
 
@@ -449,7 +472,7 @@ def test_source_integrity_violation_raises_error_inv02(tmp_path: Path) -> None:
 # 4. Coverage Extraction & Edge Cases
 # =====================================================================
 
-def test_missing_coverage_json_handled_safely() -> None:
+def test_missing_coverage_json_handled_safely(tmp_path: Path) -> None:
     """
     Verifies that when coverage.json is absent, line_coverage defaults to 0.0
     and is_valid is marked False without crashing.
@@ -457,7 +480,10 @@ def test_missing_coverage_json_handled_safely() -> None:
     sandbox = SimulatedContainerSandboxManager(coverage_payload=None)
     sandbox.script_success()
 
-    service = ExecutionService(sandbox_manager=sandbox)
+    service = ExecutionService(
+        sandbox_manager=sandbox,
+        source_root=_make_repository_root(tmp_path),
+    )
     plan = _make_plan()
     candidate = _make_candidate()
 
@@ -470,14 +496,17 @@ def test_missing_coverage_json_handled_safely() -> None:
     assert "not found" in (service.last_coverage.error_message or "").lower()
 
 
-def test_malformed_coverage_json_handled_safely() -> None:
+def test_malformed_coverage_json_handled_safely(tmp_path: Path) -> None:
     """
     Verifies that malformed coverage JSON falls back gracefully without crashing.
     """
     sandbox = SimulatedContainerSandboxManager(coverage_payload="{not-valid-json}")
     sandbox.script_success()
 
-    service = ExecutionService(sandbox_manager=sandbox)
+    service = ExecutionService(
+        sandbox_manager=sandbox,
+        source_root=_make_repository_root(tmp_path),
+    )
     plan = _make_plan()
     candidate = _make_candidate()
 
@@ -509,6 +538,7 @@ def test_container_and_mounts_cleaned_up_on_sandbox_execution_error(tmp_path: Pa
 
     service = ExecutionService(
         sandbox_manager=sandbox,
+        source_root=_make_repository_root(tmp_path),
         staging_root=staging_root,
         scratch_root=scratch_root,
     )
@@ -542,6 +572,7 @@ def test_mounts_cleaned_up_on_sandbox_initialization_error(tmp_path: Path) -> No
 
     service = ExecutionService(
         sandbox_manager=sandbox,
+        source_root=_make_repository_root(tmp_path),
         staging_root=staging_root,
         scratch_root=scratch_root,
     )
@@ -565,7 +596,10 @@ def test_unvalidated_candidates_rejected_inv04(tmp_path: Path) -> None:
     before staging and never executed (INV-04).
     """
     sandbox = SimulatedContainerSandboxManager()
-    service = ExecutionService(sandbox_manager=sandbox)
+    service = ExecutionService(
+        sandbox_manager=sandbox,
+        source_root=_make_repository_root(tmp_path),
+    )
 
     plan = _make_plan()
     bad_cand = _make_candidate(status=ValidationStatus.REJECTED_SECURITY)
@@ -578,12 +612,15 @@ def test_unvalidated_candidates_rejected_inv04(tmp_path: Path) -> None:
     assert sandbox.active_containers == []
 
 
-def test_empty_candidates_and_no_existing_tests_rejected() -> None:
+def test_empty_candidates_and_no_existing_tests_rejected(tmp_path: Path) -> None:
     """
     Verifies that an error is raised when neither candidates nor existing tests are provided.
     """
     sandbox = SimulatedContainerSandboxManager()
-    service = ExecutionService(sandbox_manager=sandbox)
+    service = ExecutionService(
+        sandbox_manager=sandbox,
+        source_root=_make_repository_root(tmp_path),
+    )
     plan = _make_plan(existing_tests=())
 
     with pytest.raises(ValueError) as exc_info:
@@ -600,7 +637,10 @@ def test_existing_tests_execution_without_candidates(tmp_path: Path) -> None:
     sandbox = SimulatedContainerSandboxManager()
     sandbox.script_success(stdout="=== 5 passed in 0.8s ===\n")
 
-    service = ExecutionService(sandbox_manager=sandbox)
+    service = ExecutionService(
+        sandbox_manager=sandbox,
+        source_root=_make_repository_root(tmp_path),
+    )
     plan = _make_plan(
         plan_id="plan-regression-01",
         existing_tests=(Path("tests/test_suite.py"),),
@@ -618,14 +658,17 @@ def test_existing_tests_execution_without_candidates(tmp_path: Path) -> None:
     assert cmd[1] == "/workspace/src/tests/test_suite.py"
 
 
-def test_execute_candidate_convenience_method() -> None:
+def test_execute_candidate_convenience_method(tmp_path: Path) -> None:
     """
     Verifies the execute_candidate convenience helper.
     """
     sandbox = SimulatedContainerSandboxManager()
     sandbox.script_success(stdout="=== 1 passed in 0.1s ===\n")
 
-    service = ExecutionService(sandbox_manager=sandbox)
+    service = ExecutionService(
+        sandbox_manager=sandbox,
+        source_root=_make_repository_root(tmp_path),
+    )
     plan = _make_plan()
     cand = _make_candidate(candidate_id="cand-singular-42")
 
@@ -649,6 +692,7 @@ def test_keep_artifacts_preserves_directories(tmp_path: Path) -> None:
 
     service = ExecutionService(
         sandbox_manager=sandbox,
+        source_root=_make_repository_root(tmp_path),
         staging_root=staging_root,
         scratch_root=scratch_root,
         keep_artifacts=True,
